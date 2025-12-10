@@ -130,6 +130,27 @@ def init_db() -> None:
                 lastHeartbeatTs TEXT
             )
         """)
+        # NEW: ocpp_messages log table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ocpp_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sessionId TEXT,
+                transactionId TEXT,
+                connectorId INTEGER,
+                direction TEXT, -- sent | received
+                action TEXT,    -- BootNotification, Heartbeat, StatusNotification, StartTransaction, MeterValues, StopTransaction, RemoteStartTransaction, RemoteStopTransaction, ...
+                messageId TEXT,
+                relatedMessageId TEXT,
+                ts TEXT,        -- ISO8601 timestamp
+                payload TEXT,   -- JSON string
+                resultStatus TEXT, -- Accepted/Rejected or error codes
+                replayed INTEGER DEFAULT 0
+            )
+        """)
+        # indices for performance
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ocpp_messages_session_ts ON ocpp_messages(sessionId, ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ocpp_messages_msgid ON ocpp_messages(messageId)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ocpp_messages_related ON ocpp_messages(relatedMessageId)")
         # seed settings if empty
         cur.execute("SELECT COUNT(*) as c FROM settings")
         if cur.fetchone()["c"] == 0:
@@ -255,3 +276,120 @@ def get_session_detail(session_id: str) -> dict:
         "meterValues": [dict(m) for m in meters],
         "meterStats": stats,
     }
+
+# PUBLIC_INTERFACE
+def add_ocpp_message(
+    session_id: str,
+    direction: str,
+    action: str,
+    message_id: str,
+    ts: str,
+    payload: dict,
+    connector_id: int | None = None,
+    transaction_id: str | None = None,
+    related_message_id: str | None = None,
+    result_status: str | None = None,
+    replayed: bool = False,
+) -> int:
+    """Insert an OCPP message log row and return inserted id."""
+    import json as _json
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO ocpp_messages
+                (sessionId, transactionId, connectorId, direction, action, messageId, relatedMessageId, ts, payload, resultStatus, replayed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                transaction_id,
+                connector_id,
+                direction,
+                action,
+                message_id,
+                related_message_id,
+                ts,
+                _json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload),
+                result_status,
+                1 if replayed else 0,
+            ),
+        )
+        return int(cur.lastrowid)
+
+# PUBLIC_INTERFACE
+def get_session_messages(session_id: str, limit: int = 100, after: str | None = None, before: str | None = None, action: str | None = None, direction: str | None = None) -> list[dict]:
+    """Return OCPP messages for a session filtered and ordered by timestamp ascending."""
+    clauses = ["sessionId = ?"]
+    params: list[Any] = [session_id]
+    if after:
+        clauses.append("ts > ?")
+        params.append(after)
+    if before:
+        clauses.append("ts < ?")
+        params.append(before)
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
+    if direction:
+        clauses.append("direction = ?")
+        params.append(direction)
+    where = " AND ".join(clauses)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM ocpp_messages WHERE {where} ORDER BY ts ASC LIMIT ?",
+            (*params, int(limit)),
+        ).fetchall()
+    out = []
+    import json as _json
+    for r in rows:
+        d = dict(r)
+        # try parse payload
+        try:
+            d["payload"] = _json.loads(d.get("payload") or "{}")
+        except Exception:
+            pass
+        d["replayed"] = bool(d.get("replayed", 0))
+        out.append(d)
+    return out
+
+# PUBLIC_INTERFACE
+def get_session_timeline(session_id: str, limit: int = 500) -> list[dict]:
+    """Return a normalized timeline combining session_events and ocpp_messages for a session."""
+    with get_conn() as conn:
+        evs = conn.execute("SELECT id, ts, type, payload FROM session_events WHERE sessionId = ? ORDER BY ts ASC", (session_id,)).fetchall()
+        msgs = conn.execute("SELECT * FROM ocpp_messages WHERE sessionId = ? ORDER BY ts ASC LIMIT ?", (session_id, int(limit))).fetchall()
+    import json as _json
+    timeline: list[dict] = []
+    for e in evs:
+        item = {"kind": "event", "id": e["id"], "ts": e["ts"], "type": e["type"]}
+        try:
+            item["payload"] = _json.loads(e["payload"] or "{}")
+        except Exception:
+            item["payload"] = e["payload"]
+        timeline.append(item)
+    for m in msgs:
+        d = dict(m)
+        try:
+            d["payload"] = _json.loads(d.get("payload") or "{}")
+        except Exception:
+            pass
+        d["replayed"] = bool(d.get("replayed", 0))
+        # Normalize for UI
+        item = {
+            "kind": "ocpp",
+            "id": d["id"],
+            "ts": d["ts"],
+            "direction": d["direction"],
+            "action": d["action"],
+            "messageId": d["messageId"],
+            "relatedMessageId": d.get("relatedMessageId"),
+            "status": d.get("resultStatus"),
+            "replayed": d.get("replayed", False),
+            "connectorId": d.get("connectorId"),
+            "transactionId": d.get("transactionId"),
+            "payload": d.get("payload"),
+        }
+        timeline.append(item)
+    # final sort by timestamp then id
+    timeline.sort(key=lambda x: (x.get("ts") or "", x.get("id") or 0))
+    return timeline

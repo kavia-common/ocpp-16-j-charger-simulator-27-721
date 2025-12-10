@@ -7,7 +7,7 @@ from datetime import datetime
 import asyncio
 import json
 
-from .db import get_settings, update_settings, get_live_state, list_sessions, get_session_detail
+from .db import get_settings, update_settings, get_live_state, list_sessions, get_session_detail, get_session_messages, get_session_timeline
 
 router = APIRouter()
 
@@ -60,6 +60,51 @@ def session_detail(sessionId: str) -> Dict[str, Any]:
     if not data:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     return data
+
+@router.get(
+    "/sessions/{sessionId}/messages",
+    summary="List OCPP messages for session",
+    tags=["Sessions"],
+)
+def session_messages(
+    sessionId: str,
+    limit: int = 200,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    action: Optional[str] = None,
+    direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    PUBLIC_INTERFACE
+    Return OCPP messages for a session with optional filtering and pagination cursors.
+
+    Parameters:
+    - sessionId: Session identifier
+    - limit: max items (default 200)
+    - after: return items strictly after this ISO8601 timestamp
+    - before: return items strictly before this ISO8601 timestamp
+    - action: filter by OCPP action name
+    - direction: 'sent' or 'received'
+    """
+    items = get_session_messages(sessionId, limit=limit, after=after, before=before, action=action, direction=direction)
+    return {"items": items, "count": len(items)}
+
+@router.get(
+    "/sessions/{sessionId}/timeline",
+    summary="Get normalized session timeline",
+    tags=["Sessions"],
+)
+def session_timeline(sessionId: str, limit: int = 1000) -> Dict[str, Any]:
+    """
+    PUBLIC_INTERFACE
+    Return a normalized timeline combining state events and OCPP messages for a session.
+
+    Parameters:
+    - sessionId: Session identifier
+    - limit: maximum combined timeline entries
+    """
+    items = get_session_timeline(sessionId, limit=limit)
+    return {"items": items, "count": len(items)}
 
 @router.get("/live/stream", summary="Live state stream (SSE)", tags=["Live"])
 def live_stream():

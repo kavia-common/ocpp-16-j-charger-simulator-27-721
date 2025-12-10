@@ -26,6 +26,7 @@ input, select { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px 
 .btn.secondary { background: #334155; color: var(--text); }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: 8px; border-bottom: 1px solid #233; }
+.err-row { background: rgba(248,113,113,0.08); }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; background: #1f2937; color: var(--text); font-size: 12px; }
 .status-Available { color: var(--ok); }
 .status-Charging { color: var(--accent); }
